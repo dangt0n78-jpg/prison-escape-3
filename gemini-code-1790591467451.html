@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prison Escape: Polarized</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0f172a;
+            color: #e2e8f0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        canvas {
+            border: 4px solid #334155;
+            background-color: #1e293b;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+            border-radius: 8px;
+        }
+        #ui-layer {
+            width: 800px;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .hud-box {
+            background: #1e293b;
+            padding: 10px 20px;
+            border-radius: 6px;
+            border: 2px solid #334155;
+        }
+        .alarm-container {
+            width: 300px;
+            height: 20px;
+            background: #000;
+            border: 2px solid #ef4444;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        #alarm-bar {
+            width: 0%;
+            height: 100%;
+            background: #ef4444;
+            transition: width 0.1s linear;
+        }
+        #instructions {
+            margin-top: 15px;
+            text-align: center;
+            color: #94a3b8;
+            line-height: 1.5;
+        }
+        .key {
+            background: #334155;
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: #fff;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="hud-box">
+            <div style="font-size: 14px; color: #94a3b8;">MÀNG LỌC HIỆN TẠI</div>
+            <div style="font-size: 24px; font-weight: bold; color: #38bdf8;" id="angle-display">0°</div>
+        </div>
+        <div class="hud-box" style="text-align: right;">
+            <div style="font-size: 14px; color: #ef4444; font-weight: bold;">MỨC ĐỘ BÁO ĐỘNG</div>
+            <div class="alarm-container"><div id="alarm-bar"></div></div>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+
+    <div id="instructions">
+        Di chuyển: <span class="key">W</span> <span class="key">A</span> <span class="key">S</span> <span class="key">D</span> &nbsp; | &nbsp; 
+        Xoay khiên: <span class="key">Q</span> / <span class="key">E</span> (hoặc Mũi tên <span class="key">←</span> <span class="key">→</span>)<br>
+        <i>Mẹo: Hãy nhìn các <b>đường kẻ sọc</b> trên vùng sáng của camera. Xoay khiên của bạn <b>VUÔNG GÓC</b> với nó để tàng hình!</i>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const angleDisplay = document.getElementById('angle-display');
+        const alarmBar = document.getElementById('alarm-bar');
+
+        // Input
+        const keys = {};
+        window.addEventListener('keydown', e => keys[e.code] = true);
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        // Player State
+        const player = {
+            x: 50,
+            y: 250,
+            radius: 15,
+            speed: 150,
+            polarizationAngle: 0, // Độ (Degrees)
+            alarmLevel: 0
+        };
+
+        // Camera Data (Guards/Sensors)
+        const cameras = [
+            // Camera trên quét xuống - Ánh sáng dọc (90 độ) -> Phải xoay khiên 0 độ
+            { x: 250, y: 0, faceAngle: 90, coneAngle: 60, range: 350, polarization: 90, sweepSpeed: 30, baseFaceAngle: 90, sweepRange: 40, sweepDir: 1 },
+            
+            // Camera dưới quét lên - Ánh sáng chéo (45 độ) -> Phải xoay khiên 135 độ
+            { x: 500, y: 500, faceAngle: -90, coneAngle: 70, range: 350, polarization: 45, sweepSpeed: 45, baseFaceAngle: -90, sweepRange: 50, sweepDir: 1 }
+        ];
+
+        // Environment
+        const exitZone = { x: 730, y: 200, width: 70, height: 100 };
+        const walls = [
+            { x: 0, y: 0, w: 100, h: 200 },
+            { x: 0, y: 300, w: 100, h: 200 },
+            { x: 700, y: 0, w: 100, h: 200 },
+            { x: 700, y: 300, w: 100, h: 200 }
+        ];
+
+        let gameState = 'playing'; // 'playing', 'win', 'lose'
+        let lastTime = 0;
+
+        // Utilities
+        const deg2rad = d => d * Math.PI / 180;
+        const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+
+        function resetGame() {
+            player.x = 50;
+            player.y = 250;
+            player.alarmLevel = 0;
+            gameState = 'playing';
+        }
+
+        // Cập nhật logic
+        function update(delta) {
+            if (gameState !== 'playing') {
+                if (keys['Space']) resetGame();
+                return;
+            }
+
+            // Di chuyển
+            let dx = 0, dy = 0;
+            if (keys['KeyW']) dy -= 1;
+            if (keys['KeyS']) dy += 1;
+            if (keys['KeyA']) dx -= 1;
+            if (keys['KeyD']) dx += 1;
+
+            if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; } // Chuẩn hóa đường chéo
+            player.x += dx * player.speed * delta;
+            player.y += dy * player.speed * delta;
+
+            // Xoay khiên
+            let rotSpeed = 120 * delta; // Xoay 120 độ / giây
+            if (keys['KeyQ'] || keys['ArrowLeft']) player.polarizationAngle -= rotSpeed;
+            if (keys['KeyE'] || keys['ArrowRight']) player.polarizationAngle += rotSpeed;
+            
+            // Chuẩn hóa góc 0-180
+            if (player.polarizationAngle < 0) player.polarizationAngle += 180;
+            if (player.polarizationAngle >= 180) player.polarizationAngle -= 180;
+            
+            // Khóa nhân vật trong màn hình
+            player.x = clamp(player.x, player.radius, canvas.width - player.radius);
+            player.y = clamp(player.y, player.radius, canvas.height - player.radius);
+
+            // Cập nhật UI góc
+            angleDisplay.innerText = Math.round(player.polarizationAngle) + '°';
+
+            // Cập nhật Camera (Quét lùi tiến)
+            let isDetected = false;
+            let maxIntensity = 0;
+
+            cameras.forEach(cam => {
+                cam.faceAngle += cam.sweepSpeed * delta * cam.sweepDir;
+                if (Math.abs(cam.faceAngle - cam.baseFaceAngle) > cam.sweepRange) {
+                    cam.sweepDir *= -1; // Đảo chiều quét
+                }
+
+                // KIỂM TRA PHÁT HIỆN
+                // 1. Khoảng cách
+                const distToPlayer = Math.hypot(player.x - cam.x, player.y - cam.y);
+                if (distToPlayer < cam.range) {
+                    // 2. Góc hình nón
+                    const angleToPlayer = Math.atan2(player.y - cam.y, player.x - cam.x) * 180 / Math.PI;
+                    let angleDiff = Math.abs(angleToPlayer - cam.faceAngle);
+                    // Chuẩn hóa góc chênh lệch
+                    while (angleDiff > 180) angleDiff -= 360;
+                    angleDiff = Math.abs(angleDiff);
+
+                    if (angleDiff < cam.coneAngle / 2) {
+                        // Nằm trong tầm nhìn! Tính định luật Malus
+                        // I = I0 * cos^2(theta)
+                        const polDiff = deg2rad(player.polarizationAngle - cam.polarization);
+                        const intensity = Math.pow(Math.cos(polDiff), 2); // Trả về từ 0.0 đến 1.0
+
+                        if (intensity > maxIntensity) maxIntensity = intensity;
+
+                        // Nếu cường độ lọt vào > 10% (0.1), báo động tăng
+                        if (intensity > 0.1) {
+                            isDetected = true;
+                        }
+                    }
+                }
+            });
+
+            // Xử lý báo động
+            if (isDetected) {
+                // Báo động tăng nhanh dựa trên cường độ sáng lọt qua
+                player.alarmLevel += (40 * maxIntensity) * delta; 
+            } else {
+                // Tự động giảm nếu đang an toàn
+                player.alarmLevel -= 15 * delta;
+            }
+            player.alarmLevel = clamp(player.alarmLevel, 0, 100);
+            
+            // Cập nhật UI Báo động
+            alarmBar.style.width = player.alarmLevel + '%';
+            if(player.alarmLevel > 50) alarmBar.style.background = '#f97316'; // Cam
+            if(player.alarmLevel > 80) alarmBar.style.background = '#ef4444'; // Đỏ
+            if(player.alarmLevel <= 50) alarmBar.style.background = '#eab308'; // Vàng
+
+            // Game Over & Win conditions
+            if (player.alarmLevel >= 100) {
+                gameState = 'lose';
+            }
+            
+            if (player.x > exitZone.x && player.y > exitZone.y && player.y < exitZone.y + exitZone.height) {
+                gameState = 'win';
+            }
+        }
+
+        // Vẽ đồ họa
+        function drawPatternLine(x, y, angle, length, ctx) {
+            ctx.beginPath();
+            ctx.moveTo(x - Math.cos(deg2rad(angle)) * length, y - Math.sin(deg2rad(angle)) * length);
+            ctx.lineTo(x + Math.cos(deg2rad(angle)) * length, y + Math.sin(deg2rad(angle)) * length);
+            ctx.stroke();
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Vẽ Vùng Thoát Hiểm
+            ctx.fillStyle = '#166534';
+            ctx.fillRect(exitZone.x, exitZone.y, exitZone.width, exitZone.height);
+            ctx.fillStyle = '#4ade80';
+            ctx.font = '16px sans-serif';
+            ctx.fillText("EXIT", exitZone.x + 15, exitZone.y + 55);
+
+            // Vẽ Tường / Buồng giam
+            ctx.fillStyle = '#0f172a';
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 4;
+            walls.forEach(w => {
+                ctx.fillRect(w.x, w.y, w.w, w.h);
+                ctx.strokeRect(w.x, w.y, w.w, w.h);
+            });
+
+            // Vẽ Camera và Tầm Nhìn
+            cameras.forEach(cam => {
+                // Vẽ nón sáng (Cone)
+                const startAngle = deg2rad(cam.faceAngle - cam.coneAngle / 2);
+                const endAngle = deg2rad(cam.faceAngle + cam.coneAngle / 2);
+
+                ctx.beginPath();
+                ctx.moveTo(cam.x, cam.y);
+                ctx.arc(cam.x, cam.y, cam.range, startAngle, endAngle);
+                ctx.closePath();
+
+                // Gradient tạo hiệu ứng ánh sáng
+                const gradient = ctx.createRadialGradient(cam.x, cam.y, 0, cam.x, cam.y, cam.range);
+                gradient.addColorStop(0, 'rgba(239, 68, 68, 0.4)');
+                gradient.addColorStop(1, 'rgba(239, 68, 68, 0)');
+                ctx.fillStyle = gradient;
+                ctx.fill();
+
+                // Mẫu họa tiết phân cực (Polarization Pattern) trên nón sáng
+                ctx.save();
+                ctx.clip(); // Chỉ vẽ sọc trong hình nón
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.lineWidth = 2;
+                // Vẽ các đường sọc song song
+                for(let i = -cam.range; i < cam.range; i+= 15) {
+                    const px = cam.x + Math.cos(deg2rad(cam.polarization + 90)) * i;
+                    const py = cam.y + Math.sin(deg2rad(cam.polarization + 90)) * i;
+                    drawPatternLine(px, py, cam.polarization, cam.range * 2, ctx);
+                }
+                ctx.restore();
+
+                // Vẽ cục Camera
+                ctx.fillStyle = '#ef4444';
+                ctx.beginPath();
+                ctx.arc(cam.x, cam.y, 10, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Vẽ Nhân Vật (Player)
+            ctx.fillStyle = '#38bdf8'; // Xanh sáng
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Vẽ Màng Lọc của Nhân Vật (Polarizer Filter)
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.radius + 5, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            // Vẽ các đường biểu diễn góc phân cực trên người nhân vật
+            ctx.strokeStyle = 'rgba(255,255,255, 0.8)';
+            ctx.lineWidth = 2;
+            for(let i = -10; i <= 10; i+=5) {
+                const px = player.x + Math.cos(deg2rad(player.polarizationAngle + 90)) * i;
+                const py = player.y + Math.sin(deg2rad(player.polarizationAngle + 90)) * i;
+                drawPatternLine(px, py, player.polarizationAngle, player.radius + 5, ctx);
+            }
+
+            // UI Trạng thái kết thúc
+            if (gameState !== 'playing') {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.textAlign = 'center';
+                if (gameState === 'lose') {
+                    ctx.fillStyle = '#ef4444';
+                    ctx.font = 'bold 48px sans-serif';
+                    ctx.fillText('DETECTED!', canvas.width/2, canvas.height/2 - 20);
+                } else if (gameState === 'win') {
+                    ctx.fillStyle = '#4ade80';
+                    ctx.font = 'bold 48px sans-serif';
+                    ctx.fillText('ESCAPE SUCCESSFUL!', canvas.width/2, canvas.height/2 - 20);
+                }
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '20px sans-serif';
+                ctx.fillText('Nhấn SPACE để chơi lại', canvas.width/2, canvas.height/2 + 30);
+            }
+        }
+
+        // Game Loop
+        function loop(timestamp) {
+            if (!lastTime) lastTime = timestamp;
+            const delta = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+
+            update(delta);
+            render();
+
+            requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
